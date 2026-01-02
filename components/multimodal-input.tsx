@@ -13,9 +13,10 @@ import {
   useEffect,
   useRef,
   useState,
+  useMemo,
 } from "react";
 import { toast } from "sonner";
-import { useLocalStorage, useWindowSize } from "usehooks-ts";
+import { useLocalStorage, useWindowSize, useDebounceValue } from "usehooks-ts";
 import {
   ModelSelector,
   ModelSelectorContent,
@@ -46,6 +47,9 @@ import { PreviewAttachment } from "./preview-attachment";
 import { SuggestedActions } from "./suggested-actions";
 import { Button } from "./ui/button";
 import type { VisibilityType } from "./visibility-selector";
+import { SavedPromptsButton } from "./saved-prompts-button";
+import { VoiceInputButton } from "./voice-input-button";
+import { TokenCounter } from "@/lib/utils/token-counter";
 
 function setCookie(name: string, value: string) {
   const maxAge = 60 * 60 * 24 * 365; // 1 year
@@ -86,6 +90,14 @@ function PureMultimodalInput({
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { width } = useWindowSize();
+
+  // Debounce input to avoid expensive token counting on every keystroke
+  const [debouncedInput] = useDebounceValue(input, 1000);
+
+  // Calculate token count for current input (only after user stops typing for 1s)
+  const inputTokenCount = useMemo(() => {
+    return debouncedInput.trim() ? TokenCounter.countTextTokens(debouncedInput, selectedModelId) : 0;
+  }, [debouncedInput, selectedModelId]);
 
   const adjustHeight = useCallback(() => {
     if (textareaRef.current) {
@@ -145,6 +157,11 @@ function PureMultimodalInput({
   const [uploadQueue, setUploadQueue] = useState<string[]>([]);
 
   const submitForm = useCallback(() => {
+    // Don't submit if input is empty/whitespace and no attachments
+    if (!input.trim() && attachments.length === 0) {
+      return;
+    }
+
     window.history.pushState({}, "", `/chat/${chatId}`);
 
     sendMessage({
@@ -374,12 +391,37 @@ function PureMultimodalInput({
             value={input}
           />
         </div>
+        {inputTokenCount > 0 && (
+          <div className="flex justify-end px-2">
+            <span className="text-xs text-muted-foreground">
+              ~{inputTokenCount} tokens
+            </span>
+          </div>
+        )}
         <PromptInputToolbar className="border-top-0! border-t-0! p-0 shadow-none dark:border-0 dark:border-transparent!">
           <PromptInputTools className="gap-0 sm:gap-0.5">
             <AttachmentsButton
               fileInputRef={fileInputRef}
               selectedModelId={selectedModelId}
               status={status}
+            />
+            <SavedPromptsButton
+              onSelectPrompt={(content) => {
+                setInput((current) => current ? `${current} ${content}` : content);
+                if (textareaRef.current) {
+                  textareaRef.current.focus();
+                }
+              }}
+            />
+            <VoiceInputButton
+              chatId={chatId}
+              disabled={status !== "ready"}
+              onTranscript={(text) => {
+                setInput((current) => current ? `${current} ${text}` : text);
+                if (textareaRef.current) {
+                  textareaRef.current.focus();
+                }
+              }}
             />
             <ModelSelectorCompact
               onModelChange={onModelChange}

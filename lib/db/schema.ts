@@ -168,3 +168,40 @@ export const stream = pgTable(
 );
 
 export type Stream = InferSelectModel<typeof stream>;
+
+export const tokenUsage = pgTable("TokenUsage", {
+  id: uuid("id").primaryKey().notNull().defaultRandom(),
+  chatId: uuid("chatId")
+    .notNull()
+    .references(() => chat.id),
+  userId: uuid("userId")
+    .notNull()
+    .references(() => user.id),
+  modelId: varchar("modelId", { length: 128 }).notNull(),
+  // For text generation (LLM)
+  promptTokens: varchar("promptTokens", { length: 32 }),
+  completionTokens: varchar("completionTokens", { length: 32 }),
+  totalTokens: varchar("totalTokens", { length: 32 }),
+  // For transcription (Whisper)
+  audioSeconds: varchar("audioSeconds", { length: 32 }),
+  // Type to distinguish usage types
+  usageType: varchar("usageType", { length: 32 }).notNull().default("chat"), // 'chat' or 'transcription'
+  createdAt: timestamp("createdAt").notNull(),
+});
+
+export type TokenUsage = InferSelectModel<typeof tokenUsage>;
+
+export const savedPrompt = pgTable("SavedPrompt", {
+  id: uuid("id").primaryKey().notNull().defaultRandom(),
+  userId: uuid("userId")
+    .notNull()
+    .references(() => user.id),
+  title: varchar("title", { length: 255 }).notNull(),
+  content: text("content").notNull(),
+  category: varchar("category", { length: 64 }),
+  useCount: varchar("useCount", { length: 32 }).notNull().default("0"),
+  createdAt: timestamp("createdAt").notNull(),
+  updatedAt: timestamp("updatedAt").notNull(),
+});
+
+export type SavedPrompt = InferSelectModel<typeof savedPrompt>;

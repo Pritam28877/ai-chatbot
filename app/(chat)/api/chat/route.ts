@@ -29,6 +29,7 @@ import {
   getMessagesByChatId,
   saveChat,
   saveMessages,
+  saveTokenUsage,
   updateChatTitleById,
   updateMessage,
 } from "@/lib/db/queries";
@@ -36,6 +37,7 @@ import type { DBMessage } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
 import type { ChatMessage } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
+import { TokenCounter } from "@/lib/utils/token-counter";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
@@ -155,6 +157,16 @@ export async function POST(request: Request) {
     const streamId = generateUUID();
     await createStreamId({ streamId, chatId: id });
 
+    // Store token usage data to save after stream completes
+    let tokenUsageData: {
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+    } | null = null;
+
+    // Store estimated input tokens for manual counting fallback
+    let estimatedInputTokens: { inputTokens: number } | null = null;
+
     const stream = createUIMessageStream({
       // Pass original messages for tool approval continuation
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
@@ -171,10 +183,30 @@ export async function POST(request: Request) {
           selectedChatModel.includes("reasoning") ||
           selectedChatModel.includes("thinking");
 
+        console.log(
+          `[Chat ${id}] Starting streamText for model: ${selectedChatModel}`
+        );
+
+        // Pre-count input tokens for fallback
+        const modelMessages = await convertToModelMessages(uiMessages);
+        const systemPromptText = systemPrompt({
+          selectedChatModel,
+          requestHints,
+        });
+        estimatedInputTokens = await TokenCounter.countTokens(
+          modelMessages,
+          systemPromptText,
+          selectedChatModel
+        );
+        console.log(
+          `[Chat ${id}] Estimated input tokens:`,
+          estimatedInputTokens.inputTokens
+        );
+
         const result = streamText({
           model: getLanguageModel(selectedChatModel),
-          system: systemPrompt({ selectedChatModel, requestHints }),
-          messages: await convertToModelMessages(uiMessages),
+          system: systemPromptText,
+          messages: modelMessages,
           stopWhen: stepCountIs(5),
           experimental_activeTools: isReasoningModel
             ? []
@@ -216,9 +248,62 @@ export async function POST(request: Request) {
             sendReasoning: true,
           })
         );
+
+        // Capture token usage using the result.usage Promise (recommended approach)
+        // This is more reliable than onFinish callback with AI Gateway
+        // If the AI Gateway doesn't return token usage, we'll manually count tokens
+        result.usage
+          .then((usageData) => {
+            console.log(`[Chat ${id}] result.usage Promise resolved`);
+            console.log(
+              `[Chat ${id}] usage data:`,
+              JSON.stringify(usageData, null, 2)
+            );
+
+            if (usageData) {
+              const inputTokens = usageData.inputTokens ?? 0;
+              const outputTokens = usageData.outputTokens ?? 0;
+              const total = usageData.totalTokens ?? inputTokens + outputTokens;
+
+              console.log(
+                `[Chat ${id}] Parsed tokens - input: ${inputTokens}, output: ${outputTokens}, total: ${total}`
+              );
+
+              // If the AI Gateway returns 0 tokens, use manual counting as fallback
+              if (total > 0) {
+                tokenUsageData = {
+                  promptTokens: inputTokens,
+                  completionTokens: outputTokens,
+                  totalTokens: total,
+                };
+                console.log(
+                  `[Chat ${id}] Token usage captured from AI Gateway:`,
+                  tokenUsageData
+                );
+              } else {
+                console.warn(
+                  `[Chat ${id}] AI Gateway returned 0 tokens, will use manual counting fallback`
+                );
+              }
+            } else {
+              console.warn(
+                `[Chat ${id}] usage Promise returned null/undefined`
+              );
+            }
+          })
+          .catch((error) => {
+            console.error(
+              `[Chat ${id}] Error getting usage from Promise:`,
+              error
+            );
+          });
       },
       generateId: generateUUID,
       onFinish: async ({ messages: finishedMessages }) => {
+        console.log(`[Chat ${id}] createUIMessageStream onFinish called`);
+        console.log(`[Chat ${id}] tokenUsageData before save:`, tokenUsageData);
+
+        // Save messages first
         if (isToolApprovalFlow) {
           // For tool approval, update existing messages (tool state changed) and save new ones
           for (const finishedMsg of finishedMessages) {
@@ -257,6 +342,83 @@ export async function POST(request: Request) {
               chatId: id,
             })),
           });
+        }
+
+        // Save token usage after messages are saved
+        if (tokenUsageData) {
+          try {
+            console.log(`[Chat ${id}] Saving token usage to database:`, {
+              chatId: id,
+              userId: session.user.id,
+              modelId: selectedChatModel,
+              ...tokenUsageData,
+            });
+            await saveTokenUsage({
+              chatId: id,
+              userId: session.user.id,
+              modelId: selectedChatModel,
+              ...tokenUsageData,
+            });
+            console.log(`[Chat ${id}] Token usage saved successfully!`);
+          } catch (error) {
+            console.error(`[Chat ${id}] Failed to save token usage:`, error);
+            // Don't fail the request if token tracking fails
+          }
+        } else {
+          // Fallback: manually count tokens if AI Gateway didn't return usage
+          console.warn(
+            `[Chat ${id}] No token usage data from AI Gateway, using manual counting fallback`
+          );
+          try {
+            // Count output tokens from the assistant's response
+            const assistantMessages = finishedMessages.filter(
+              (msg) => msg.role === "assistant"
+            );
+            let outputText = "";
+            for (const msg of assistantMessages) {
+              if (Array.isArray(msg.parts)) {
+                for (const part of msg.parts) {
+                  if (part.type === "text") {
+                    outputText += part.text;
+                  }
+                }
+              }
+            }
+
+            const estimatedOutputTokens = TokenCounter.countOutputTokens(
+              outputText,
+              selectedChatModel
+            );
+
+            const manualTokenUsage = {
+              promptTokens: estimatedInputTokens?.inputTokens ?? 0,
+              completionTokens: estimatedOutputTokens,
+              totalTokens:
+                (estimatedInputTokens?.inputTokens ?? 0) +
+                estimatedOutputTokens,
+            };
+
+            console.log(
+              `[Chat ${id}] Manually counted tokens:`,
+              manualTokenUsage
+            );
+
+            await saveTokenUsage({
+              chatId: id,
+              userId: session.user.id,
+              modelId: selectedChatModel,
+              ...manualTokenUsage,
+            });
+
+            console.log(
+              `[Chat ${id}] Manually counted token usage saved successfully!`
+            );
+          } catch (error) {
+            console.error(
+              `[Chat ${id}] Failed to manually count/save tokens:`,
+              error
+            );
+          }
         }
       },
       onError: () => {

@@ -30,6 +30,10 @@ import {
   type User,
   user,
   vote,
+  type TokenUsage,
+  tokenUsage,
+  type SavedPrompt,
+  savedPrompt,
 } from "./schema";
 import { generateHashedPassword } from "./utils";
 
@@ -597,6 +601,253 @@ export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
     throw new ChatSDKError(
       "bad_request:database",
       "Failed to get stream ids by chat id"
+    );
+  }
+}
+
+// Token Usage Queries
+export async function saveTokenUsage({
+  chatId,
+  userId,
+  modelId,
+  promptTokens,
+  completionTokens,
+  totalTokens,
+}: {
+  chatId: string;
+  userId: string;
+  modelId: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}) {
+  try {
+    return await db.insert(tokenUsage).values({
+      chatId,
+      userId,
+      modelId,
+      promptTokens: promptTokens.toString(),
+      completionTokens: completionTokens.toString(),
+      totalTokens: totalTokens.toString(),
+      usageType: "chat",
+      createdAt: new Date(),
+    });
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to save token usage"
+    );
+  }
+}
+
+export async function saveTranscriptionUsage({
+  chatId,
+  userId,
+  modelId,
+  audioSeconds,
+}: {
+  chatId: string;
+  userId: string;
+  modelId: string;
+  audioSeconds: number;
+}) {
+  try {
+    return await db.insert(tokenUsage).values({
+      chatId,
+      userId,
+      modelId,
+      audioSeconds: audioSeconds.toString(),
+      usageType: "transcription",
+      createdAt: new Date(),
+    });
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to save transcription usage"
+    );
+  }
+}
+
+export async function getTokenUsageByDateRange({
+  startDate,
+  endDate,
+}: {
+  startDate: Date;
+  endDate: Date;
+}): Promise<TokenUsage[]> {
+  try {
+    return await db
+      .select()
+      .from(tokenUsage)
+      .where(
+        and(
+          gte(tokenUsage.createdAt, startDate),
+          lt(tokenUsage.createdAt, endDate)
+        )
+      )
+      .orderBy(desc(tokenUsage.createdAt));
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get token usage by date range"
+    );
+  }
+}
+
+export async function getTokenUsageByUserId({
+  userId,
+}: {
+  userId: string;
+}): Promise<TokenUsage[]> {
+  try {
+    return await db
+      .select()
+      .from(tokenUsage)
+      .where(eq(tokenUsage.userId, userId))
+      .orderBy(desc(tokenUsage.createdAt));
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get token usage by user"
+    );
+  }
+}
+
+// Saved Prompts Queries
+export async function createSavedPrompt({
+  userId,
+  title,
+  content,
+  category,
+}: {
+  userId: string;
+  title: string;
+  content: string;
+  category?: string;
+}) {
+  try {
+    const now = new Date();
+    return await db
+      .insert(savedPrompt)
+      .values({
+        userId,
+        title,
+        content,
+        category,
+        useCount: "0",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to create saved prompt"
+    );
+  }
+}
+
+export async function getSavedPromptsByUserId({
+  userId,
+}: {
+  userId: string;
+}): Promise<SavedPrompt[]> {
+  try {
+    return await db
+      .select()
+      .from(savedPrompt)
+      .where(eq(savedPrompt.userId, userId))
+      .orderBy(desc(savedPrompt.updatedAt));
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get saved prompts"
+    );
+  }
+}
+
+export async function updateSavedPrompt({
+  id,
+  userId,
+  title,
+  content,
+  category,
+}: {
+  id: string;
+  userId: string;
+  title?: string;
+  content?: string;
+  category?: string;
+}) {
+  try {
+    const updates: Partial<SavedPrompt> = {
+      updatedAt: new Date(),
+    };
+    if (title !== undefined) {
+      updates.title = title;
+    }
+    if (content !== undefined) {
+      updates.content = content;
+    }
+    if (category !== undefined) {
+      updates.category = category;
+    }
+
+    return await db
+      .update(savedPrompt)
+      .set(updates)
+      .where(and(eq(savedPrompt.id, id), eq(savedPrompt.userId, userId)))
+      .returning();
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to update saved prompt"
+    );
+  }
+}
+
+export async function deleteSavedPrompt({
+  id,
+  userId,
+}: {
+  id: string;
+  userId: string;
+}) {
+  try {
+    return await db
+      .delete(savedPrompt)
+      .where(and(eq(savedPrompt.id, id), eq(savedPrompt.userId, userId)))
+      .returning();
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to delete saved prompt"
+    );
+  }
+}
+
+export async function incrementPromptUseCount({ id }: { id: string }) {
+  try {
+    const prompt = await db
+      .select()
+      .from(savedPrompt)
+      .where(eq(savedPrompt.id, id))
+      .limit(1);
+
+    if (prompt.length === 0) {
+      return null;
+    }
+
+    const currentCount = Number.parseInt(prompt[0].useCount || "0", 10);
+    return await db
+      .update(savedPrompt)
+      .set({ useCount: (currentCount + 1).toString() })
+      .where(eq(savedPrompt.id, id))
+      .returning();
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to increment prompt use count"
     );
   }
 }
