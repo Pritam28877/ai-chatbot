@@ -1,10 +1,10 @@
-import { encodingForModel } from "js-tiktoken";
-import type { CoreMessage } from "ai";
+import { encodingForModel, type TiktokenModel } from "js-tiktoken";
+import type { UIMessage } from "ai";
 
 // Model-specific token counter
 // For models that don't report usage, we estimate using js-tiktoken
 export class TokenCounter {
-  private static getEncodingModelName(modelId: string): string {
+  private static getEncodingModelName(modelId: string): TiktokenModel {
     // Map AI Gateway model IDs to tiktoken models
     if (modelId.includes("gpt-4")) {
       return "gpt-4";
@@ -18,7 +18,7 @@ export class TokenCounter {
   }
 
   static async countTokens(
-    messages: CoreMessage[],
+    messages: UIMessage[],
     systemPrompt: string,
     modelId: string
   ): Promise<{ inputTokens: number }> {
@@ -35,12 +35,10 @@ export class TokenCounter {
 
       // Count message tokens
       for (const message of messages) {
-        if (typeof message.content === "string") {
-          totalTokens += encoding.encode(message.content).length;
-        } else if (Array.isArray(message.content)) {
-          // Handle multi-part content (text + images/files)
-          for (const part of message.content) {
-            if (part.type === "text") {
+        if (message.parts) {
+          // Handle UI message parts (text + tools/files)
+          for (const part of message.parts) {
+            if (part.type === "text" && part.text) {
               totalTokens += encoding.encode(part.text).length;
             }
             // Note: Images and other media types have different token costs
@@ -78,17 +76,15 @@ export class TokenCounter {
   }
 
   private static roughTokenEstimate(
-    messages: CoreMessage[],
+    messages: UIMessage[],
     systemPrompt: string
   ): number {
     let totalChars = systemPrompt.length;
 
     for (const message of messages) {
-      if (typeof message.content === "string") {
-        totalChars += message.content.length;
-      } else if (Array.isArray(message.content)) {
-        for (const part of message.content) {
-          if (part.type === "text") {
+      if (message.parts) {
+        for (const part of message.parts) {
+          if (part.type === "text" && part.text) {
             totalChars += part.text.length;
           }
         }

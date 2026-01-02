@@ -194,7 +194,7 @@ export async function POST(request: Request) {
           requestHints,
         });
         estimatedInputTokens = await TokenCounter.countTokens(
-          modelMessages,
+          uiMessages,
           systemPromptText,
           selectedChatModel
         );
